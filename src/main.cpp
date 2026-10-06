@@ -36,6 +36,8 @@ struct RequestState {
     std::string path;
     guint status = 2;
     GVariant *results = nullptr;
+    bool completed = false;
+    bool portal_disappeared = false;
 };
 
 void on_response(GDBusConnection *, const gchar *, const gchar *object_path,
@@ -43,6 +45,14 @@ void on_response(GDBusConnection *, const gchar *, const gchar *object_path,
     auto &state = *static_cast<RequestState *>(data);
     if (state.path != object_path) return;
     g_variant_get(parameters, "(u@a{sv})", &state.status, &state.results);
+    state.completed = true;
+    g_main_loop_quit(state.loop);
+}
+
+void on_portal_disappeared(GDBusConnection *, const gchar *, gpointer data) {
+    auto &state = *static_cast<RequestState *>(data);
+    if (state.completed) return;
+    state.portal_disappeared = true;
     g_main_loop_quit(state.loop);
 }
 
@@ -67,9 +77,19 @@ GVariant *portal_request(GDBusConnection *bus, const char *method, GVariant *arg
     g_variant_get(reply, "(&o)", &path);
     state.path = path;
     g_variant_unref(reply);
-    g_main_loop_run(state.loop);
+    const guint name_watch = g_bus_watch_name_on_connection(
+        bus, kPortalName, G_BUS_NAME_WATCHER_FLAGS_NONE, nullptr,
+        on_portal_disappeared, &state, nullptr);
+    if (!state.completed && !state.portal_disappeared) g_main_loop_run(state.loop);
+    g_bus_unwatch_name(name_watch);
     g_dbus_connection_signal_unsubscribe(bus, subscription);
     g_main_loop_unref(state.loop);
+
+    if (state.portal_disappeared) {
+        if (state.results) g_variant_unref(state.results);
+        throw std::runtime_error(std::string(method) +
+            ": xdg-desktop-portal exited while handling the request");
+    }
 
     if (state.status != 0) {
         if (state.results) g_variant_unref(state.results);
@@ -83,6 +103,8 @@ GVariant *options_with_token(const char *token) {
     GVariantBuilder options;
     g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&options, "{sv}", "handle_token", g_variant_new_string(token));
+    g_variant_builder_add(&options, "{sv}", "session_handle_token",
+                          g_variant_new_string("vr_session"));
     return g_variant_new("(a{sv})", &options);
 }
 
@@ -97,6 +119,7 @@ struct PortalCapture {
         bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
         if (!bus) throw std::runtime_error(error_message("Session bus", error));
 
+        std::cerr << "Portal: CreateSession\n";
         GVariant *results = portal_request(bus, "CreateSession", options_with_token("vr_create"));
         gchar *handle = nullptr;
         if (!g_variant_lookup(results, "session_handle", "o", &handle)) {
@@ -112,11 +135,13 @@ struct PortalCapture {
         g_variant_builder_add(&options, "{sv}", "handle_token", g_variant_new_string("vr_select"));
         g_variant_builder_add(&options, "{sv}", "types", g_variant_new_uint32(2)); // windows
         g_variant_builder_add(&options, "{sv}", "multiple", g_variant_new_boolean(FALSE));
+        std::cerr << "Portal: SelectSources\n";
         results = portal_request(bus, "SelectSources", g_variant_new("(oa{sv})", session.c_str(), &options));
         g_variant_unref(results);
 
         g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
         g_variant_builder_add(&options, "{sv}", "handle_token", g_variant_new_string("vr_start"));
+        std::cerr << "Portal: Start\n";
         results = portal_request(bus, "Start", g_variant_new("(osa{sv})", session.c_str(), "", &options));
         GVariant *streams = g_variant_lookup_value(results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
         if (!streams || g_variant_n_children(streams) == 0) {
@@ -134,6 +159,7 @@ struct PortalCapture {
 
         g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
         GUnixFDList *fd_list = nullptr;
+        std::cerr << "Portal: OpenPipeWireRemote\n";
         GVariant *reply = g_dbus_connection_call_with_unix_fd_list_sync(
             bus, kPortalName, kPortalPath, kScreenCast, "OpenPipeWireRemote",
             g_variant_new("(oa{sv})", session.c_str(), &options), G_VARIANT_TYPE("(h)"),
