@@ -121,13 +121,21 @@ struct PortalCapture {
 
         std::cerr << "Portal: CreateSession\n";
         GVariant *results = portal_request(bus, "CreateSession", options_with_token("vr_create"));
-        gchar *handle = nullptr;
-        if (!g_variant_lookup(results, "session_handle", "o", &handle)) {
-            g_variant_unref(results);
-            throw std::runtime_error("Portal did not return a session handle");
+        GVariant *handle_value = g_variant_lookup_value(results, "session_handle", nullptr);
+        if (handle_value &&
+            (g_variant_is_of_type(handle_value, G_VARIANT_TYPE_OBJECT_PATH) ||
+             g_variant_is_of_type(handle_value, G_VARIANT_TYPE_STRING))) {
+            const gchar *handle = g_variant_get_string(handle_value, nullptr);
+            if (g_variant_is_object_path(handle)) session = handle;
         }
-        session = handle;
-        g_free(handle);
+        if (handle_value) g_variant_unref(handle_value);
+        if (session.empty()) {
+            gchar *details = g_variant_print(results, TRUE);
+            const std::string message = std::string("Portal did not return a session handle; response: ") + details;
+            g_free(details);
+            g_variant_unref(results);
+            throw std::runtime_error(message);
+        }
         g_variant_unref(results);
 
         GVariantBuilder options;
