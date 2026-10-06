@@ -39,9 +39,10 @@ cmake --build build -j
 ./build/window-to-steamvr
 ```
 
-Choose the stereo window in the portal dialog. SteamVR receives one full
-captured texture with independent horizontal crop bounds for each eye. Press
-Ctrl+C in the terminal to stop. Close the selected window to end the stream.
+Choose the stereo window in the portal dialog. The app copies each half of the
+captured frame to a separate OpenGL texture and submits one texture per eye to
+SteamVR. Press Ctrl+C in the terminal to stop. Close the selected window to end
+the stream.
 
 This program submits the image directly to the compositor, so it fills each
 eye's view. It does not place the image on a virtual theater screen or apply
