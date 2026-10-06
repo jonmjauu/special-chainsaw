@@ -50,6 +50,11 @@ captured frame to a separate OpenGL texture and submits one texture per eye to
 SteamVR. Press Ctrl+C in the terminal to stop. Close the selected window to end
 the stream.
 
+The capture follows window resizes. When PipeWire supplies a frame with new
+dimensions, the app resizes both eye textures and prints the old and new sizes.
+If the frame width is odd, the right eye gets the extra pixel. The selected
+window must continue producing side-by-side stereo frames after resizing.
+
 This program submits the image directly to the compositor, so it fills each
 eye's view. It does not place the image on a virtual theater screen or apply
 stereo depth adjustments.
@@ -71,6 +76,12 @@ The message has this shape:
 ```json
 {
   "timestamp_ms": 1791300000000,
+  "capture": {
+    "width_px": 2560,
+    "height_px": 1410,
+    "left_eye_width_px": 1280,
+    "right_eye_width_px": 1280
+  },
   "headset": {
     "connected": true,
     "pose": {
@@ -101,6 +112,7 @@ The message has this shape:
 ```
 
 Positions are metres in OpenVR tracking space (+X right, +Y up, -Z forward).
+The `capture` dimensions update with the next frame received after a resize.
 Angles use a Y-X-Z yaw, pitch, roll decomposition in degrees. `pose` is `null`
 when tracking is invalid; trigger `value` is `null` if the legacy OpenVR API
 does not expose a trigger axis. Trigger and grip buttons use OpenVR's legacy

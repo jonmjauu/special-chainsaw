@@ -113,7 +113,8 @@ void append_controller(std::ostringstream &out, vr::ETrackedControllerRole role,
 } // namespace
 
 std::string tracking_state_json(const vr::TrackedDevicePose_t *poses,
-                                std::size_t pose_count) {
+                                std::size_t pose_count, int capture_width,
+                                int capture_height) {
     static ControllerAxisCache left_axis;
     static ControllerAxisCache right_axis;
     std::ostringstream out;
@@ -121,7 +122,12 @@ std::string tracking_state_json(const vr::TrackedDevicePose_t *poses,
     out << std::fixed << std::setprecision(6);
     const auto timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    out << "{\"timestamp_ms\":" << timestamp_ms << ",\"headset\":";
+    out << "{\"timestamp_ms\":" << timestamp_ms
+        << ",\"capture\":{\"width_px\":" << capture_width
+        << ",\"height_px\":" << capture_height
+        << ",\"left_eye_width_px\":" << capture_width / 2
+        << ",\"right_eye_width_px\":" << capture_width - capture_width / 2
+        << "},\"headset\":";
     append_headset(out, poses, pose_count);
     out << ",\"controllers\":{\"left\":";
     append_controller(out, vr::TrackedControllerRole_LeftHand, poses, pose_count,

@@ -13,6 +13,8 @@
 #include <csignal>
 #include <cstdint>
 #include <iostream>
+#include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -233,6 +235,7 @@ struct Graphics {
     GLuint textures[2] = {0, 0};
     int width = 0;
     int height = 0;
+    GLint max_texture_size = 0;
 
     Graphics() {
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0)
@@ -245,6 +248,7 @@ struct Graphics {
         if (!window) throw std::runtime_error(std::string("SDL window: ") + SDL_GetError());
         context = SDL_GL_CreateContext(window);
         if (!context) throw std::runtime_error(std::string("OpenGL context: ") + SDL_GetError());
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
         glGenTextures(2, textures);
         for (GLuint texture : textures) {
             glBindTexture(GL_TEXTURE_2D, texture);
@@ -265,9 +269,16 @@ struct Graphics {
         const int next_width = static_cast<int>(GST_VIDEO_INFO_WIDTH(&info));
         const int next_height = static_cast<int>(GST_VIDEO_INFO_HEIGHT(&info));
         const int stride = GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0);
-        if (next_width >= 2 && next_height > 0 && stride >= next_width * 4 && stride % 4 == 0) {
+        if (GST_VIDEO_INFO_FORMAT(&info) == GST_VIDEO_FORMAT_RGBA &&
+            next_width >= 2 && next_height > 0 &&
+            next_width <= std::numeric_limits<int>::max() / 4 &&
+            stride >= next_width * 4 && stride % 4 == 0) {
             const bool resized = width != next_width || height != next_height;
             const int eye_widths[2] = {next_width / 2, next_width - next_width / 2};
+            if (eye_widths[1] > max_texture_size || next_height > max_texture_size) {
+                gst_video_frame_unmap(&frame);
+                throw std::runtime_error("Captured window exceeds OpenGL's maximum texture size");
+            }
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, stride / 4);
             for (int eye = 0; eye < 2; ++eye) {
@@ -285,10 +296,18 @@ struct Graphics {
             }
             glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            const GLenum upload_error = glGetError();
+            if (upload_error != GL_NO_ERROR) {
+                gst_video_frame_unmap(&frame);
+                throw std::runtime_error("OpenGL texture upload failed (error " +
+                    std::to_string(upload_error) + ")");
+            }
             if (resized) {
+                std::cerr << (width == 0 ? "Capture: " : "Capture resized: ");
+                if (width != 0) std::cerr << width << "x" << height << " -> ";
                 width = next_width;
                 height = next_height;
-                std::cerr << "Capture: " << width << "x" << height
+                std::cerr << width << "x" << height
                           << " (left " << eye_widths[0] << "x" << height
                           << ", right " << eye_widths[1] << "x" << height << ")\n";
             }
@@ -358,14 +377,13 @@ void run(unsigned ws_port) {
         gst_object_unref(bus);
 
         // Keep only the newest captured frame to minimize latency.
-        GstSample *newest = nullptr;
+        std::unique_ptr<GstSample, decltype(&gst_sample_unref)> newest(nullptr, gst_sample_unref);
         while (GstSample *sample = gst_app_sink_try_pull_sample(video.sink, 0)) {
-            if (newest) gst_sample_unref(newest);
-            newest = sample;
+            newest.reset(sample);
         }
         if (newest) {
-            graphics.upload(newest);
-            gst_sample_unref(newest);
+            graphics.upload(newest.get());
+            newest.reset();
         }
         if (graphics.width == 0) {
             SDL_Delay(10);
@@ -398,7 +416,8 @@ void run(unsigned ws_port) {
         }
         vr::VRCompositor()->PostPresentHandoff();
         if (websocket.has_clients())
-            websocket.broadcast(tracking_state_json(poses, vr::k_unMaxTrackedDeviceCount));
+            websocket.broadcast(tracking_state_json(poses, vr::k_unMaxTrackedDeviceCount,
+                                                    graphics.width, graphics.height));
     }
 }
 
