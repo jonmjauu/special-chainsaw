@@ -7,6 +7,9 @@
 #include <SDL_opengl.h>
 #include <openvr.h>
 
+#include "tracking_state.hpp"
+#include "websocket_server.hpp"
+
 #include <csignal>
 #include <cstdint>
 #include <iostream>
@@ -315,12 +318,13 @@ struct VRSystem {
     ~VRSystem() { vr::VR_Shutdown(); }
 };
 
-void run() {
+void run(unsigned ws_port) {
     std::cerr << "Choose the stereo window in the portal dialog. Press Ctrl+C to stop.\n";
     PortalCapture capture;
     VideoPipeline video(capture.fd, capture.node);
     Graphics graphics;
     VRSystem vr_system;
+    WebSocketServer websocket(ws_port);
 
     bool running = true;
     bool reported_submission = false;
@@ -393,21 +397,35 @@ void run() {
             reported_submission = true;
         }
         vr::VRCompositor()->PostPresentHandoff();
+        if (websocket.has_clients())
+            websocket.broadcast(tracking_state_json(poses, vr::k_unMaxTrackedDeviceCount));
     }
 }
 
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 1) {
-        std::cerr << "Usage: " << argv[0] << "\n";
+    unsigned ws_port = 8765;
+    if (argc == 3 && std::string(argv[1]) == "--ws-port") {
+        try {
+            std::size_t consumed = 0;
+            const auto parsed = std::stoul(argv[2], &consumed);
+            if (consumed != std::string(argv[2]).size() || parsed == 0 || parsed > 65535)
+                throw std::invalid_argument("WebSocket port must be between 1 and 65535");
+            ws_port = static_cast<unsigned>(parsed);
+        } catch (const std::exception &) {
+            std::cerr << "Invalid WebSocket port\n";
+            return 2;
+        }
+    } else if (argc != 1) {
+        std::cerr << "Usage: " << argv[0] << " [--ws-port PORT]\n";
         return 2;
     }
     std::signal(SIGINT, stop_on_signal);
     std::signal(SIGTERM, stop_on_signal);
-    gst_init(&argc, &argv);
+    gst_init(nullptr, nullptr);
     try {
-        run();
+        run(ws_port);
     } catch (const std::exception &error) {
         std::cerr << error.what() << "\n";
         return 1;
