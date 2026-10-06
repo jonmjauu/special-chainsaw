@@ -227,7 +227,7 @@ struct VideoPipeline {
 struct Graphics {
     SDL_Window *window = nullptr;
     SDL_GLContext context = nullptr;
-    GLuint texture = 0;
+    GLuint textures[2] = {0, 0};
     int width = 0;
     int height = 0;
 
@@ -242,12 +242,14 @@ struct Graphics {
         if (!window) throw std::runtime_error(std::string("SDL window: ") + SDL_GetError());
         context = SDL_GL_CreateContext(window);
         if (!context) throw std::runtime_error(std::string("OpenGL context: ") + SDL_GetError());
-        glGenTextures(1, &texture);
-        glBindTexture(GL_TEXTURE_2D, texture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glGenTextures(2, textures);
+        for (GLuint texture : textures) {
+            glBindTexture(GL_TEXTURE_2D, texture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
     }
 
     void upload(GstSample *sample) {
@@ -260,27 +262,39 @@ struct Graphics {
         const int next_width = static_cast<int>(GST_VIDEO_INFO_WIDTH(&info));
         const int next_height = static_cast<int>(GST_VIDEO_INFO_HEIGHT(&info));
         const int stride = GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0);
-        if (next_width > 0 && next_height > 0 && stride >= next_width * 4) {
-            glBindTexture(GL_TEXTURE_2D, texture);
+        if (next_width >= 2 && next_height > 0 && stride >= next_width * 4 && stride % 4 == 0) {
+            const bool resized = width != next_width || height != next_height;
+            const int eye_widths[2] = {next_width / 2, next_width - next_width / 2};
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, stride / 4);
-            if (width != next_width || height != next_height) {
+            for (int eye = 0; eye < 2; ++eye) {
+                glBindTexture(GL_TEXTURE_2D, textures[eye]);
+                glPixelStorei(GL_UNPACK_SKIP_PIXELS, eye == 0 ? 0 : eye_widths[0]);
+                if (resized) {
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, eye_widths[eye], next_height,
+                                 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                 GST_VIDEO_FRAME_PLANE_DATA(&frame, 0));
+                } else {
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, eye_widths[eye], next_height,
+                                    GL_RGBA, GL_UNSIGNED_BYTE,
+                                    GST_VIDEO_FRAME_PLANE_DATA(&frame, 0));
+                }
+            }
+            glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            if (resized) {
                 width = next_width;
                 height = next_height;
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
-                             GL_UNSIGNED_BYTE, GST_VIDEO_FRAME_PLANE_DATA(&frame, 0));
-                std::cerr << "Capture: " << width << "x" << height << "\n";
-            } else {
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA,
-                                GL_UNSIGNED_BYTE, GST_VIDEO_FRAME_PLANE_DATA(&frame, 0));
+                std::cerr << "Capture: " << width << "x" << height
+                          << " (left " << eye_widths[0] << "x" << height
+                          << ", right " << eye_widths[1] << "x" << height << ")\n";
             }
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         }
         gst_video_frame_unmap(&frame);
     }
 
     ~Graphics() {
-        if (texture) glDeleteTextures(1, &texture);
+        glDeleteTextures(2, textures);
         if (context) SDL_GL_DeleteContext(context);
         if (window) SDL_DestroyWindow(window);
         SDL_Quit();
@@ -309,6 +323,7 @@ void run() {
     VRSystem vr_system;
 
     bool running = true;
+    bool reported_submission = false;
     while (running && !interrupted) {
         while (g_main_context_iteration(nullptr, FALSE)) {}
         SDL_Event event;
@@ -359,18 +374,24 @@ void run() {
         if (pose_error != vr::VRCompositorError_None)
             throw std::runtime_error("SteamVR pose wait failed: " + std::to_string(pose_error));
         glFinish(); // Ensure the compositor sees the completed texture upload.
-        vr::Texture_t texture = {
-            reinterpret_cast<void *>(static_cast<uintptr_t>(graphics.texture)),
+        vr::Texture_t left_texture = {
+            reinterpret_cast<void *>(static_cast<uintptr_t>(graphics.textures[0])),
+            vr::TextureType_OpenGL, vr::ColorSpace_Gamma};
+        vr::Texture_t right_texture = {
+            reinterpret_cast<void *>(static_cast<uintptr_t>(graphics.textures[1])),
             vr::TextureType_OpenGL, vr::ColorSpace_Gamma};
         // Portal frames are top-down; OpenGL uploads their first row at v=0.
         // Reverse V so the image is upright in the compositor.
-        const vr::VRTextureBounds_t left = {0.0f, 1.0f, 0.5f, 0.0f};
-        const vr::VRTextureBounds_t right = {0.5f, 1.0f, 1.0f, 0.0f};
-        const auto left_error = vr::VRCompositor()->Submit(vr::Eye_Left, &texture, &left);
-        const auto right_error = vr::VRCompositor()->Submit(vr::Eye_Right, &texture, &right);
+        const vr::VRTextureBounds_t bounds = {0.0f, 1.0f, 1.0f, 0.0f};
+        const auto left_error = vr::VRCompositor()->Submit(vr::Eye_Left, &left_texture, &bounds);
+        const auto right_error = vr::VRCompositor()->Submit(vr::Eye_Right, &right_texture, &bounds);
         if (left_error != vr::VRCompositorError_None || right_error != vr::VRCompositorError_None)
             throw std::runtime_error("SteamVR rejected a submitted frame (errors " +
                 std::to_string(left_error) + ", " + std::to_string(right_error) + ")");
+        if (!reported_submission) {
+            std::cerr << "SteamVR accepted frames for both eyes\n";
+            reported_submission = true;
+        }
         vr::VRCompositor()->PostPresentHandoff();
     }
 }
