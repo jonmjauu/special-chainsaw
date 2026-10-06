@@ -46,3 +46,19 @@ Ctrl+C in the terminal to stop. Close the selected window to end the stream.
 This program submits the image directly to the compositor, so it fills each
 eye's view. It does not place the image on a virtual theater screen or apply
 stereo depth adjustments.
+
+## If the window picker crashes
+
+If a crash dialog names `xdg-desktop-portal`, the desktop's screen-sharing
+service exited. The app prints the portal step it reached before the crash.
+Collect that terminal output and the service log:
+
+```sh
+journalctl --user -b -u xdg-desktop-portal -n 100 --no-pager
+coredumpctl info xdg-desktop-portal
+```
+
+Also note your distribution, desktop environment, and versions of
+`xdg-desktop-portal` and its desktop-specific backend. The portal and backend
+must support window ScreenCast sources; a compositor or portal failure needs
+to be fixed in those components.
